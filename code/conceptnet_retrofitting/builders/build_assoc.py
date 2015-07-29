@@ -14,15 +14,17 @@ def build_from_conceptnet(labels, filename, verbose=True):
 
     with open(filename, encoding='utf-8') as infile:
         for line in infile:
-            concept1, concept2, value_str, *_ = line.strip().split('\t')
+            concept1, concept2, value_str, *more = line.strip().split('\t')
             index1 = labels.add(concept1)
             index2 = labels.add(concept2)
 
             value = float(value_str)
             # A tweak that seems to help:
             #
-            # if dataset.startswith('/d/verbosity'):
-            #     value = value * 10
+            if more:
+                dataset, relation = more
+                if dataset.startswith('/d/verbosity'):
+                    value = value * 10
             mat[index1, index2] = value
             mat[index2, index1] = value
 
