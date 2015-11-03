@@ -1,6 +1,7 @@
 import numpy as np
 
 from conceptnet_retrofitting.standardization import standardize
+#standardize = str.lower
 from conceptnet_retrofitting.builders.label_set import LabelSet
 
 def standardize_vecs(labels, vecs):
