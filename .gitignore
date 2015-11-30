@@ -75,3 +75,6 @@ build.ninja
 
 code/data
 code/build-data
+
+# IPython notebooks
+code/notebook

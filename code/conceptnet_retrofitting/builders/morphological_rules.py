@@ -26,6 +26,11 @@ def partition_from_end(n: int, word: str):
         return word[-n:], word[:-n]
 
 
+def item_sq_norm(item):
+    _, vec = item
+    return vec.dot(vec)
+
+
 class MorphologicalRule:
     rule_type = '?'
 
@@ -62,6 +67,15 @@ class MorphologicalRule:
         vector = self.vector_space.to_vector(word)
         return self.apply(word), vector + self.vector
 
+    def reverse(self):
+        new_rule = self.__class__(
+            self.after, self.before, self.vector_space, self.apply(self.prototype),
+            self.strength
+        )
+        if self.vector is not None:
+            new_rule.vector = -self.vector
+        return new_rule
+
     def match_scores(self, word, max=100):
         if not self.applies_to(word):
             return max, 0.
@@ -78,6 +92,20 @@ class MorphologicalRule:
     def explains(self, word, rank_threshold=50, cosine_threshold=0.5):
         rank, sim = self.match_scores(word, rank_threshold)
         return rank < rank_threshold and sim > cosine_threshold
+
+    def to_tsv(self):
+        return '%s\t%s\t%s\t%s\t%s' % (self.rule_type, self.before, self.after, self.prototype, self.strength)
+
+    @staticmethod
+    def from_tsv(row, wv):
+        rule_type, before, after, prototype, strength_str = row.split('\t')
+        strength = float(strength_str)
+        if rule_type == 'prefix':
+            rule_class = PrefixMorphologicalRule
+        else:
+            rule_class = SuffixMorphologicalRule
+        rule = rule_class(before, after, wv, prototype, strength)
+        return rule
 
     def __str__(self):
         if self.prototype is None:
@@ -123,6 +151,56 @@ class SuffixMorphologicalRule(MorphologicalRule):
         return base + self.before
 
 
+class VectorLemmatizer:
+    def __init__(self, rules: list, word_vectors: WordVectors):
+        self.word_vectors = word_vectors
+        self.prefixes, self.suffixes = make_rules_dicts(rules)
+
+    def lemmatize(self, word):
+        nrows, k = self.word_vectors.vectors.shape
+        try:
+            rank = self.word_vectors.labels.index(word)
+            vec = np.copy(self.word_vectors.vectors[rank])
+        except KeyError:
+            rank = nrows
+            vec = np.zeros(k)
+        while True:
+            meanings = defaultdict(lambda: np.zeros(k))
+            for rule in applicable_rules(word, self.prefixes, self.suffixes):
+                new_word = rule.apply(word)
+                if new_word.isalpha() and new_word in self.word_vectors.labels and self.word_vectors.labels.index(new_word) < rank:
+                    unrule = rule.reverse()
+                    word2, new_vec = unrule.apply_vector(new_word)
+                    assert word2 == word
+                    new_vec /= np.sqrt(new_vec.dot(new_vec))
+                    new_vec *= rule.strength
+                    meanings[new_word] += new_vec
+            word_meanings = sorted(meanings.items(), key=item_sq_norm, reverse=True)
+            if word_meanings:
+                new_word, combined_vec = word_meanings[0]
+                word = new_word
+                rank = self.word_vectors.labels.index(new_word)
+                print(word, rank)
+                vec += combined_vec
+            else:
+                return word, vec
+
+
+def save_rules(rules, filename):
+    with open(filename, 'w', encoding='utf-8') as out:
+        for rule in rules:
+            print(rule.to_tsv(), file=out)
+
+
+def load_rules(filename, wv):
+    with open(filename) as file:
+        rules = [
+            MorphologicalRule.from_tsv(line.strip(), wv)
+            for line in file
+        ]
+    return rules
+
+
 def affix_dicts(vocab, max_length=6, min_remaining=2, min_examples=10):
     prefixes = defaultdict(set)
     suffixes = defaultdict(set)
@@ -131,8 +209,10 @@ def affix_dicts(vocab, max_length=6, min_remaining=2, min_examples=10):
         for affix_length in range(current_max + 1):
             prefix, prefix_base = partition_from_start(affix_length, word)
             suffix, suffix_base = partition_from_end(affix_length, word)
-            prefixes[prefix].add(prefix_base)
-            suffixes[suffix].add(suffix_base)
+            if prefix_base.isalpha():
+                prefixes[prefix].add(prefix_base)
+            if suffix_base.isalpha():
+                suffixes[suffix].add(suffix_base)
 
     prefixes_out = {
         prefix: remainders
@@ -206,6 +286,61 @@ def generate_vector_rules(wv, vocab, min_examples=10, n_clusters=5):
     return rules
 
 
+def make_rules_dicts(rules):
+    prefixes = {}
+    suffixes = {}
+    for rule in rules:
+        if isinstance(rule, PrefixMorphologicalRule):
+            target = prefixes
+        else:
+            target = suffixes
+        rule_list = target.setdefault(rule.before, [])
+        rule_list.append(rule)
+    return prefixes, suffixes
+
+
+def applicable_rules(word, prefixes, suffixes, max_length=6, min_remaining=2):
+    current_max = min(max_length, len(word) - min_remaining)
+    rules = []
+    for affix_length in range(1, current_max + 1):
+        prefix, prefix_base = partition_from_start(affix_length, word)
+        suffix, suffix_base = partition_from_end(affix_length, word)
+        rules.extend(prefixes.get(prefix, []))
+        rules.extend(suffixes.get(suffix, []))
+    return rules
+
+
+def balderdash(wv, vocab, rules):
+    small_vocab = [w for w in vocab[:50000] if w.isalpha()]
+    prefixes, suffixes = make_rules_dicts(rules)
+    meanings = defaultdict(lambda: np.zeros(wv.vectors.shape[1]))
+    for i, word in enumerate(sorted(small_vocab)):
+        if i % 10000 == 0:
+            print(i)
+        for rule in applicable_rules(word, prefixes, suffixes):
+            new_word, vec = rule.apply_vector(word)
+            if new_word.isalpha() and new_word not in vocab:
+                vec *= rule.strength
+                meanings[new_word] += vec
+
+    print("Words inferred: %d" % len(meanings))
+    word_meanings = sorted(meanings.items(), key=item_sq_norm, reverse=True)
+    for word, vec in word_meanings:
+        similar_word, strength = wv.similar_to(vec, num=1)[0]
+        if similar_word.isalpha():
+            print(word, '=', similar_word)
+
+
+def run_balderdash():
+    wv = load_word_vectors(
+        'build-data/glove.840B.300d.lower.labels',
+        'build-data/glove.840B.300d.l1.lower.npy'
+    )
+    rules = load_rules('rules.txt', wv)
+    vocab = wv.labels
+    balderdash(wv, vocab, rules)
+
+
 def main():
     wv = load_word_vectors(
         'build-data/glove.840B.300d.lower.labels',
@@ -214,9 +349,9 @@ def main():
     print("Loaded vectors")
     vocab = wv.labels
     rules = generate_vector_rules(wv, vocab)
-    with open('rules.pkl', 'wb') as out:
-        pickle.dump(rules, out)
+    save_rules(rules, 'rules.txt')
 
 
 if __name__ == '__main__':
     main()
+    # run_balderdash()
