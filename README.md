@@ -7,6 +7,9 @@ The `paper/` directory contains the LaTeX source of our paper.  The `code/`
 directory contains a Python module called `conceptnet_retrofitting`,
 implementing the code that was used in the paper.
 
+## Downloading the term vectors
+
+
 ## Installing the code
 
 - Install base dependencies such as Python 3, NumPy, and SciPy.
